@@ -5,12 +5,12 @@
  * The only supported platform is Raspberry Pi. Requires bcm2835 library from
  * http://www.airspayce.com/mikem/bcm2835/index.html.
  * Requires root privelegies.
- * 
+ *
  * Note: You can't use integrated audio and hardware PWM at the same time.
  *       On Ubuntu - disable audio by adding `dtparam=audio=off` to `/boot/firmware/usercfg.txt`.
- * 
+ *
  * To build: `gcc -Wall pi-fan-ctrl.c -lbcm2835 -Ofast -o pi-fan-ctrl`.
- * 
+ *
  * This app uses ideas and some solutions from the pi_fan_hwpwm.c by Allan Alwyn.
  * Link: https://gist.github.com/alwynallan/1c13096c4cd675f38405702e89e0c536.
  */
@@ -25,6 +25,7 @@
 #include <signal.h>
 #include <math.h>
 #include <time.h>
+#include <errno.h>
 #include <bcm2835.h>
 
 #ifndef MAX
@@ -126,12 +127,12 @@ int main(int argc, char *argv[]) {
 	appState *state = NULL;
 	_Bool verbose = 0;
 	pwmChannel channel = PWMDefaults.channel;
-	
+
 	while ((opt = getopt(argc, argv, "c:v")) != -1) {
 		switch (opt) {
 		case 'c':
 			channel = atoi(optarg);
-			if (ok != check_pwm_channel(channel)) fatal("Channel %d not supported on this device", channel); 
+			if (ok != check_pwm_channel(channel)) fatal("Channel %d not supported on this device", channel);
 			break;
 		case 'v':
 			verbose = 1;
@@ -152,7 +153,7 @@ int main(int argc, char *argv[]) {
 	if (ok != file_write(state, ProcessIdFile, buf)) fatal("Can't set pid to %s", ProcessIdFile);
 	if (ok != init_pwm(state)) fatal("Unable initialize pwm at channel %d", state->pwm_settings->channel);
 	state->state = running;
-	
+
 	static const size_t buffer_length = 5;
 	measurement values_buffer_1[buffer_length], values_buffer_2[buffer_length];
 	measurement *active_buffer = values_buffer_1;
@@ -161,7 +162,7 @@ int main(int argc, char *argv[]) {
 	sleep_interval duration = MinimumSleep;
 	while (running == state->state) {
 		if (ok != measure_temp(state) || ok != update_pwm_range(state)) continue;
-			
+
 		if (buffer_length == buffer_offset + 1) {
 			measurement *inactive = (active_buffer == values_buffer_1) ? values_buffer_2 : values_buffer_1;
 			memcpy(inactive, ((void *)active_buffer + sizeof(measurement)), sizeof(measurement) * buffer_offset);
@@ -170,12 +171,12 @@ int main(int argc, char *argv[]) {
 		else {
 			buffer_offset++;
 		}
-		
+
 		measurement *record = &(active_buffer[buffer_offset]);
 		record->value = state->cpu_temp;
 			record->interval = duration;
 		duration = next_sleep_interval(state, duration, active_buffer, buffer_offset);
-		
+
 		get_time(time_buf, sizeof(time_buf));
 		sprintf(buf, "%s: %.2f, %.1f\n", time_buf, state->cpu_temp, (double)state->pwm_level/(double)state->pwm_settings->range*100.0);
 		file_write(state, StateFile, buf);
@@ -206,7 +207,7 @@ exst check_pwm_channel(pwmChannel channel) {
 	fseek(file, -max_len, SEEK_END);
 	size_t readen = fread(buffer, max_len, 1, file);
 	buffer[readen] = '\0';
-	
+
 	char *last_newline = strrchr(buffer, '\n');
 	char *last_line = last_newline + 1;
 	int result = (NULL != strstr(last_line, raspberry_pi_4b)) ? ok : -1;
@@ -224,7 +225,7 @@ void on_system_signal(int signum) {
 exst subscribe_to_system_signals(void) {
 	const int signals[] = { SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGPIPE, SIGTERM };
 	const size_t count = sizeof(signals) / sizeof(int);
-	
+
 	for( size_t index = 0; index < count; ++index ) {
 		signal(signals[index], on_system_signal);
 	}
@@ -234,7 +235,7 @@ exst subscribe_to_system_signals(void) {
 appState *initialize_service(pwmChannel channel) {
 	appState *state = NULL;
 	pwmSettings *settings = NULL;
-	
+
 	if (ok != subscribe_to_system_signals()) LOG_AND_RETURN(NULL, "Unable subscribe to system signals");
 
 	settings = malloc(sizeof(pwmSettings));
@@ -270,18 +271,44 @@ exst file_write(appState *app, const char *fname, const char *data) {
 	lock.l_pid = app->pid;
 
 	if ((fd = open(fname, O_RDWR | O_CREAT, 0666)) < 0) LOG_AND_RETURN(-1, "failed to open %s for writing", fname);
-	if (fcntl(fd, F_SETLK, &lock) < 0) LOG_AND_RETURN(-1, "fcntl failed to get lock on %s", fname);
-	if (ftruncate(fd, 0) < 0) LOG_AND_RETURN(-1, "truncate failed to on %s", fname);
+	if (fcntl(fd, F_SETLK, &lock) < 0) {
+	    close(fd);
+	    LOG_AND_RETURN(-1, "fcntl failed to get lock on %s", fname);
+    }
+
+    exst ret_val = ok;
+#define finalize do { \
+    lock.l_type = F_UNLCK; \
+    int unlocked = fcntl(fd, F_SETLK, &lock); \
+    int closed = close(fd); \
+    if (unlocked < 0) { \
+        error("failed unlock %s (code %d)", fname, unlocked); \
+        ret_val = -1; \
+    } \
+    if (closed < 0) { \
+        error("failed to close '%s' (code %d)", fname, closed); \
+        ret_val = -1; \
+    } \
+} while(0)
+#define on_error(__code__, ...) do { \
+    finalize; \
+    error(__VA_ARGS__); \
+    return __code__; \
+} while(0)
+
+	if (ftruncate(fd, 0) < 0) on_error(-1, "truncate failed to on %s", fname);
 	const size_t data_length = strlen(data);
-	if (data_length != write(fd, data, data_length)) LOG_AND_RETURN(-2, "failed to write %u bytes to opened %s", data_length, fname);
-	if (0 != close(fd)) return -1;
-	return ok;
+	if (-1 == write(fd, data, data_length)) on_error(-2, "failed to write %u bytes (error %d) to opened %s", data_length, errno, fname);
+	finalize;
+#undef on_error
+#undef finalize
+	return ret_val;
 }
 
 exst init_pwm(appState *app) {
 	if (initialization != app->state) return -2;
 	if (!bcm2835_init()) return -1;
-	
+
 	uint8_t pwm_pin = 0 == app->pwm_settings->channel ? 18 : 13;
 	bcm2835_gpio_fsel(pwm_pin, BCM2835_GPIO_FSEL_ALT5);
 	bcm2835_pwm_set_clock(app->pwm_settings->clock_divisor);
@@ -305,7 +332,7 @@ exst stop_fan(pwmSettings * const settings) {
 
 exst cleanup_service(appState *app) {
 	if (!app) return ok;
-	
+
 	exst result = ok;
 	if (running == app->state) {
 		app->state = finalization;
@@ -316,11 +343,11 @@ exst cleanup_service(appState *app) {
 			error("Can't deinit bcm2835");
 			result = -1;
 		}
-		
+
 		if (0 != remove(ProcessIdFile)) error("Unable to remove PID file at %s", ProcessIdFile);
 		if (0 != remove(StateFile)) error("Unable to remove state file at %s", StateFile);
 	}
-	
+
 	app->state = none;
 	return result;
 }
@@ -329,12 +356,12 @@ exst measure_temp(appState *app) {
 	FILE *file;
 	int raw_temp;
 	int read_status;
-	
+
 	if (NULL == (file = fopen("/sys/class/thermal/thermal_zone0/temp", "r"))) LOG_AND_RETURN(-1, "Can't open file '/sys/class/thermal/thermal_zone0/temp'");
 	read_status = fscanf(file, "%d", &raw_temp);
 	fclose(file);
 	if (1 != read_status) LOG_AND_RETURN(-1, "Unable read temperature from '/sys/class/thermal/thermal_zone0/temp'");
-	app->cpu_temp = (double)raw_temp / 1000.0; 
+	app->cpu_temp = (double)raw_temp / 1000.0;
 	return ok;
 }
 
@@ -369,7 +396,7 @@ exst update_pwm_range(appState *app) {
 		return ok;
 	}
 	if (running != app->state) return err_state;
-	
+
 	switch (fan) {
 		case on:
 			if (ok != start_fan(app->pwm_settings)) LOG_AND_RETURN(-2, "Unable start fan");
@@ -379,7 +406,7 @@ exst update_pwm_range(appState *app) {
 			level = 0;
 			break;
 	}
-	
+
 	apply_level(level);
 	app->fan_state = fan;
 	return ok;
@@ -441,7 +468,7 @@ sleep_interval next_sleep_interval(appState *app, sleep_interval current, measur
 
 		sum += change_speeds[index - 1];
 		--eval_index;
-			
+
 		if (0 == eval_index) break;
 		--eval_index;
 	}
