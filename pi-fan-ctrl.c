@@ -55,7 +55,7 @@ typedef struct {
 	uint32_t clock_divisor;
 	pwmData range;
 } pwmSettings;
-const pwmSettings PWMDefaults = { 0, BCM2835_PWM_CLOCK_DIVIDER_256, 1024 };
+const pwmSettings PWMDefaults = { 0, BCM2835_PWM_CLOCK_DIVIDER_1, 1024 };
 
 static const int8_t UnknownFanState = -1;
 static const double UnknownTemp = -1e5;
