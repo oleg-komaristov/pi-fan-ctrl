@@ -107,7 +107,6 @@ extern exst update_pwm_range(appState *app);
 extern void print_usage();
 extern void error(char *fmt, ...);
 extern void fatal(char *fmt, ...);
-extern void get_time(char *buffer, size_t length);
 
 typedef struct {
 	double value;
@@ -122,7 +121,6 @@ void *system_state = NULL;
 int main(int argc, char *argv[]) {
 	int opt;
 	char buf[100];
-	char time_buf[26];
 
 	appState *state = NULL;
 	_Bool verbose = 0;
@@ -177,8 +175,7 @@ int main(int argc, char *argv[]) {
 			record->interval = duration;
 		duration = next_sleep_interval(state, duration, active_buffer, buffer_offset);
 
-		get_time(time_buf, sizeof(time_buf));
-		sprintf(buf, "%s: %.2f, %.1f\n", time_buf, state->cpu_temp, (double)state->pwm_level/(double)state->pwm_settings->range*100.0);
+		sprintf(buf, "%.2f, %.1f\n", state->cpu_temp, (double)state->pwm_level/(double)state->pwm_settings->range*100.0);
 		file_write(state, StateFile, buf);
 		if(verbose) fputs(buf, stdout);
 
@@ -482,14 +479,4 @@ sleep_interval next_sleep_interval(appState *app, sleep_interval current, measur
 	result = MIN(result, MaximumSleep);
 	result = MAX(result, MinimumSleep);
 	return result;
-}
-
-void get_time(char *buffer, size_t length) {
-	time_t timer;
-	struct tm* tm_info;
-
-	timer = time(NULL);
-	tm_info = localtime(&timer);
-
-	strftime(buffer, length, "%Y-%m-%d %H:%M:%S", tm_info);
 }
